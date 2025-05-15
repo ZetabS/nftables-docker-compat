@@ -1,0 +1,125 @@
+version: "3"
+
+vars:
+  TIMESTAMP: '{{now | date "20060102-150405"}}'
+  USER:
+    sh: whoami
+  SERVICE_NAME: "nftables-docker-compat"
+  CONFIG_PATH: "/etc/nftables.conf"
+  CONFIG_FILE: "{{.TASKFILE_DIR}}/nftables.conf"
+  BACKUP_DIR: "{{.TASKFILE_DIR}}/backup"
+  BACKUP_PREFIX: "backup-"
+  BACKUP_SUFFIX: ".nft"
+  BACKUP_FILE: "{{.BACKUP_DIR}}/{{.BACKUP_PREFIX}}{{.TIMESTAMP}}{{.BACKUP_SUFFIX}}"
+  IPTABLES_BACKUP_FILE: "{{.BACKUP_DIR}}/iptables.rules"
+
+tasks:
+  show:
+    desc: "Show current nftables rules"
+    cmds:
+      - cat {{.CONFIG_PATH}} | less
+
+  validate:
+    desc: "Validate nftables configuration"
+    cmds:
+      - sudo nft -j -c -f "{{.CONFIG_FILE}}"
+
+  apply:
+    desc: "Apply nftables configuration"
+    cmds:
+      - task: validate
+      - task: backup
+      - task: copy
+      - task: iptables-save
+      - sudo nft -f "{{.CONFIG_PATH}}"
+      - task: iptables-restore
+
+  backup:
+    desc: "Backup current nftables configuration"
+    cmds:
+      - mkdir -p "{{.BACKUP_DIR}}"
+      - sudo cp {{.CONFIG_PATH}} {{.BACKUP_FILE}}
+      - sudo cp {{.CONFIG_PATH}} {{.BACKUP_DIR}}/backup-latest.nft
+      - sudo chmod 400 {{.BACKUP_FILE}}
+      - sudo chmod 400 {{.BACKUP_DIR}}/backup-latest.nft
+      - sudo chown {{.USER}}:{{.USER}} {{.BACKUP_FILE}}
+      - sudo chown {{.USER}}:{{.USER}} {{.BACKUP_DIR}}/backup-latest.nft
+    sources:
+      - "{{.CONFIG_FILE}}"
+    generates:
+      - "{{.BACKUP_DIR}}/backup-latest.nft"
+
+  rollback:
+    desc: "Rollback to selected backup (latest by default)"
+    vars:
+      FILE: "$(ls -t {{.BACKUP_DIR}}/{{.BACKUP_PREFIX}}*{{.BACKUP_SUFFIX}} | head -n 1)"
+    cmds:
+      - task: copy
+        vars:
+          CONFIG_FILE: "{{.FILE}}"
+      - task: iptables-save
+      - sudo nft -f "{{.CONFIG_PATH}}"
+      - task: iptables-restore
+
+  service-install:
+    desc: "Install nftables compatibility service"
+    cmds:
+      - task: iptables-save
+      - sudo systemctl stop nftables
+      - sudo systemctl disable nftables
+      - sudo cp ./compat-nft.service /etc/systemd/system/{{.SERVICE_NAME}}.service
+      - sudo cp ./compat-nft.sh /usr/sbin/compat-nft.sh
+      - sudo chmod +x /usr/sbin/compat-nft.sh
+      - sudo systemctl daemon-reload
+      - task: iptables-restore
+
+  service-uninstall:
+    desc: "Uninstall nftables compatibility service"
+    cmds:
+      - task: iptables-save
+      - sudo systemctl stop {{.SERVICE_NAME}}.service
+      - sudo systemctl disable {{.SERVICE_NAME}}.service
+      - sudo rm /etc/systemd/system/{{.SERVICE_NAME}}.service
+      - sudo rm /usr/sbin/compat-nft.sh
+      - sudo systemctl daemon-reload
+      - task: iptables-restore
+
+  service-enable:
+    desc: "Enable nftables compatibility service"
+    cmds:
+      - sudo systemctl enable {{.SERVICE_NAME}}.service
+      - sudo systemctl start {{.SERVICE_NAME}}.service
+
+  service-disable:
+    desc: "Disable nftables compatibility service"
+    cmds:
+      - sudo systemctl stop {{.SERVICE_NAME}}.service
+      - sudo systemctl disable {{.SERVICE_NAME}}.service
+
+  service-status:
+    desc: "Show status of nftables compatibility service"
+    cmds:
+      - sudo systemctl status {{.SERVICE_NAME}}.service || exit 0
+
+  # Do not use this tasks unless you know what you are doing
+  copy:
+    desc: "Copy current nftables rules to file without backup"
+    cmds:
+      - mkdir -p "$(dirname {{.CONFIG_PATH}})"
+      - sudo cp -f "{{.CONFIG_FILE}}" {{.CONFIG_PATH}}
+      - sudo chmod 755 {{.CONFIG_PATH}}
+      - sudo chown root:root {{.CONFIG_PATH}}
+    sources:
+      - "{{.CONFIG_FILE}}"
+    generates:
+      - "{{.CONFIG_PATH}}"
+
+  iptables-save:
+    desc: "Backup current iptables rules"
+    cmds:
+      - sudo iptables-save > {{.IPTABLES_BACKUP_FILE}}
+
+  iptables-restore:
+    desc: "Restore iptables rules"
+    cmds:
+      - sudo iptables-restore < {{.IPTABLES_BACKUP_FILE}}
